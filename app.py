@@ -3,6 +3,7 @@ import streamlit as st
 from rag.chunker import chunk_text
 from rag.embeddings import create_embeddings
 from rag.loader import load_document
+from rag.retriever import retrieve_chunks
 from rag.vector_store import get_collection_count, store_chunks
 
 st.set_page_config(
@@ -18,6 +19,8 @@ if "document_key" not in st.session_state:
     st.session_state.document_key = None
 if "stored_document" not in st.session_state:
     st.session_state.stored_document = None
+if "retrieval_results" not in st.session_state:
+    st.session_state.retrieval_results = None
 
 st.write(
     "Upload project documentation and ask questions about your project."
@@ -96,9 +99,41 @@ if uploaded_file:
     except Exception as error:
         st.error(f"Could not process the document: {error}")
 
-question = st.text_input(
-    "Ask a question about the documentation"
+st.subheader("Search Indexed Documentation")
+question = st.text_input("Ask a question about the documentation")
+top_k = st.number_input(
+    "Number of results",
+    min_value=1,
+    max_value=10,
+    value=3,
+    step=1,
 )
+
+if st.button("Search Documentation"):
+    try:
+        st.session_state.retrieval_results = retrieve_chunks(
+            question,
+            top_k=top_k,
+        )
+    except ValueError as error:
+        st.session_state.retrieval_results = None
+        st.error(str(error))
+    except RuntimeError as error:
+        st.session_state.retrieval_results = None
+        st.error(str(error))
+    except Exception:
+        st.session_state.retrieval_results = None
+        st.error("Could not search the documentation. Check your API key and try again.")
+
+retrieval_results = st.session_state.retrieval_results
+if retrieval_results is not None:
+    st.write(f"🔎 Retrieved {len(retrieval_results)} relevant chunks")
+    for index, result in enumerate(retrieval_results, start=1):
+        with st.expander(f"Result {index}"):
+            st.write(f"Source: {result['source']}")
+            st.write(f"Chunk: {result['chunk_index']}")
+            st.write(f"Distance: {result['distance']}")
+            st.text(result["text"])
 
 if question:
     st.write("Question:", question)
