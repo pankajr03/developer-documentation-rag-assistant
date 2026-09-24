@@ -1,6 +1,7 @@
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
+from uuid import uuid4
 
 from openai import APIConnectionError, AuthenticationError, RateLimitError
 
@@ -101,26 +102,51 @@ def _strip_unknown_citations(answer: str, valid_numbers: set[int]) -> str:
     return re.sub(r"[ \t]+([.,;:])", r"\1", cleaned).strip()
 
 
+def _build_result(
+    question: str,
+    answer: str,
+    sources: list[Source],
+    retrieved_chunks: list[dict[str, Any]],
+    top_k: Optional[int],
+) -> dict[str, Any]:
+    """Assemble the structured result, including a new unique response id."""
+    return {
+        "response_id": str(uuid4()),
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+        "retrieved_chunks": retrieved_chunks,
+        "model_name": MODEL_NAME,
+        "retrieval_top_k": top_k,
+    }
+
+
 def generate_answer(
-    question: str, retrieved_chunks: list[dict[str, Any]]
+    question: str,
+    retrieved_chunks: list[dict[str, Any]],
+    top_k: Optional[int] = None,
 ) -> dict[str, Any]:
     """Answer a question from retrieved chunks only, with numbered citations.
 
-    Returns {"question", "answer", "sources"}. Sources come from ChromaDB
-    metadata, never from the model, so citations cannot name a document that
-    was not retrieved.
+    Returns {"response_id", "question", "answer", "sources",
+    "retrieved_chunks", "model_name", "retrieval_top_k"}. The response id is
+    created here, once per answer, so feedback can be tied to it. Sources come
+    from ChromaDB metadata, never from the model, so citations cannot name a
+    document that was not retrieved. top_k is recorded only; it is not used
+    to filter anything.
     """
     if not isinstance(question, str) or not question.strip():
         raise ValueError("Question cannot be empty.")
 
     question = question.strip()
-    sources = build_sources(retrieved_chunks or [])
+    retrieved_chunks = retrieved_chunks or []
+    sources = build_sources(retrieved_chunks)
 
     # Without retrieved documentation there is nothing to ground an answer in,
     # so the model is never called.
     if not sources:
         logger.info("No chunks retrieved; returning the fallback message.")
-        return {"question": question, "answer": FALLBACK_MESSAGE, "sources": []}
+        return _build_result(question, FALLBACK_MESSAGE, [], [], top_k)
 
     user_input = (
         f"<context>\n{build_context(sources)}\n</context>\n\n"
@@ -160,4 +186,4 @@ def generate_answer(
         answer, {source["number"] for source in sources})
     logger.info("Generated an answer from %d sources.", len(sources))
 
-    return {"question": question, "answer": answer, "sources": sources}
+    return _build_result(question, answer, sources, retrieved_chunks, top_k)

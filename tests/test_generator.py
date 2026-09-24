@@ -1,9 +1,11 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 
 from rag.generator import (
     FALLBACK_MESSAGE,
+    MODEL_NAME,
     build_context,
     build_sources,
     generate_answer,
@@ -105,13 +107,35 @@ class GenerateAnswerTests(unittest.TestCase):
     def test_returns_structured_result_with_citation(self, create_client):
         create_client.return_value.responses.create.return_value = _response(
             "Crew report 45 minutes before departure [Source 1].")
-        result = generate_answer("What is the reporting-time rule?", CHUNKS)
+        result = generate_answer(
+            "What is the reporting-time rule?", CHUNKS, top_k=3)
 
-        self.assertEqual(set(result), {"question", "answer", "sources"})
+        self.assertEqual(set(result), {
+            "response_id", "question", "answer", "sources",
+            "retrieved_chunks", "model_name", "retrieval_top_k",
+        })
+        self.assertEqual(result["model_name"], MODEL_NAME)
+        self.assertEqual(result["retrieval_top_k"], 3)
+        self.assertEqual(result["retrieved_chunks"], CHUNKS)
         self.assertEqual(result["question"], "What is the reporting-time rule?")
         self.assertIn("[Source 1]", result["answer"])
         self.assertEqual(len(result["sources"]), 2)
         self.assertNotIn("embedding", str(result["sources"]))
+
+    @patch("rag.generator._create_client")
+    def test_each_answer_gets_a_unique_uuid_response_id(self, create_client):
+        create_client.return_value.responses.create.return_value = _response(
+            "Crew report 45 minutes early [Source 1].")
+        first = generate_answer("Reporting time?", CHUNKS)
+        second = generate_answer("Reporting time?", CHUNKS)
+        self.assertEqual(str(UUID(first["response_id"])), first["response_id"])
+        self.assertNotEqual(first["response_id"], second["response_id"])
+
+    def test_fallback_without_chunks_still_has_a_response_id(self):
+        result = generate_answer("Does it use Redis?", [])
+        self.assertTrue(UUID(result["response_id"]))
+        self.assertEqual(result["retrieved_chunks"], [])
+        self.assertIsNone(result["retrieval_top_k"])
 
     @patch("rag.generator._create_client")
     def test_unsupported_question_returns_fallback_message(self, create_client):
