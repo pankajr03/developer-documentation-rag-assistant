@@ -25,6 +25,127 @@ ChromaDB (text + metadata)          generate_answer()
                                     Thumbs up/down + comment -> SQLite
 ```
 
+## What Stage 9 adds
+
+A **golden evaluation dataset**: a version-controlled set of questions with the
+answer and source chunks a good response should have. Stage 9 only builds and
+validates the dataset. It does **not** score answers or run the RAG pipeline;
+that is the next stage.
+
+- `data/evaluation/golden_dataset.jsonl`: one JSON case per line (committed).
+- `evaluation/schemas.py`: the Pydantic model `EvaluationCase`.
+- `evaluation/dataset.py`: `load_evaluation_dataset(path)` and helpers.
+- `scripts/validate_evaluation_dataset.py`: validator CLI (exit code 0 or 1).
+- `scripts/export_feedback_candidates.py`: turns thumbs-down feedback into
+  *unreviewed* candidates (never into golden cases).
+
+Loading and validating never call an LLM or the embedding API.
+
+### Starter dataset
+
+The starter cases are written against the document that is currently indexed:
+`Speed Schedule (1).pdf` (`document_id` `speed_schedule_1`, 13 chunks), a
+roller-skating championship schedule. They are **not** Python documentation
+questions. If you index other documents, add cases for them, and re-check the
+existing ones, because chunk ids change when a document is re-chunked.
+
+### JSONL fields
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | yes | unique, stable id such as `eval_001`; never reuse or renumber |
+| `question` | yes | the user question |
+| `expected_answer` | yes | short reference answer (for unanswerable cases: the safe behaviour) |
+| `expected_keywords` | yes | concepts a good answer should mention; may be `[]` |
+| `expected_source_ids` | yes | retrieval ids that support the answer; `[]` when unanswerable |
+| `category` | yes | subject area, e.g. `reporting_rules` |
+| `difficulty` | yes | `beginner`, `intermediate` or `advanced` |
+| `answerable` | yes | `true` if the indexed documents contain the answer (real JSON boolean) |
+| `expected_source_titles` | no | human-readable document names |
+| `notes` | no | why the case exists, traps, caveats |
+| `tags` | no | free labels such as `multi_part`, `similar_sections`, `rewording` |
+| `metadata` | no | free-form object; the starter set stores `document_id` and `pages` |
+
+Rules enforced by the loader:
+
+- `id`, `question`, `expected_answer` and `category` must not be empty.
+- IDs must be unique across the file.
+- Unknown fields are rejected, so a typo like `expected_keyword` is caught.
+- `null` lists become `[]`.
+- An answerable case needs at least one `expected_source_ids` entry.
+- Every problem is reported with its line number; nothing is skipped silently.
+
+`expected_source_ids` uses **chunk ids** (for example `speed_schedule_1_p1_c2`),
+the same ids shown as *Chunk ID* in the app. When a fact is repeated (like the
+reporting-time rule), every chunk containing it is listed, and retrieving *any
+one* of them counts as finding the source. How that is scored is decided in the
+next stage.
+
+Example case (source list shortened):
+
+```json
+{"id": "eval_005", "question": "How long is one lap according to the schedule?", "expected_answer": "One lap is the length of a 200m rink, as per RSFI guidelines.", "expected_keywords": ["1 lap", "200m", "rink", "RSFI"], "expected_source_ids": ["speed_schedule_1_p1_c2", "speed_schedule_1_p2_c5"], "expected_source_titles": ["Speed Schedule (1).pdf"], "category": "race_format", "difficulty": "beginner", "answerable": true, "notes": "", "tags": ["direct_fact"], "metadata": {"document_id": "speed_schedule_1", "pages": [1, 2]}}
+```
+
+### Unanswerable cases
+
+Set `"answerable": false` and `"expected_source_ids": []` for questions the
+indexed documents cannot answer: out-of-scope questions, or details the
+document never states (a venue, a fee, results, an unexplained abbreviation).
+The `expected_answer` describes the safe behaviour: the assistant says the
+uploaded documents do not contain the information and does not guess. In this
+project that means the fixed fallback message. Retrieval will still return the
+nearest chunks for such questions, and that is expected.
+
+### How to add a reviewed evaluation case
+
+1. Ask the question in the app, or look through the chunks in the upload view,
+   and find the chunk(s) that really support the answer. Copy their *Chunk ID*
+   values exactly.
+2. Write a short `expected_answer` in your own words (do not paste long passages).
+3. Append **one line** to `golden_dataset.jsonl` with the next free `id`.
+4. Validate (below). Use `--check-index` to confirm the chunk ids exist.
+5. Commit the dataset together with the document it refers to, or note which
+   document must be indexed.
+
+### Validate the dataset
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate_evaluation_dataset.py
+.\.venv\Scripts\python.exe scripts\validate_evaluation_dataset.py --dataset data\evaluation\golden_dataset.jsonl
+.\.venv\Scripts\python.exe scripts\validate_evaluation_dataset.py --check-index
+```
+
+It prints the path, totals, answerable/unanswerable counts, counts per category
+and difficulty, any invalid or duplicate records, and a final `PASS` or `FAIL`.
+The exit code is `0` on PASS and `1` on FAIL, so it can run in CI.
+`--check-index` also confirms each `expected_source_ids` entry exists in the
+local ChromaDB collection (chunk ids only, no API calls). Leave it off in CI
+where no index exists.
+
+### Export feedback candidates
+
+Thumbs-down feedback (Stage 8) can point at questions worth testing:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_feedback_candidates.py --output data\evaluation\feedback_candidates.jsonl
+```
+
+- The feedback database is opened **read-only**; no feedback is changed.
+- Each distinct question (compared after lower-casing and collapsing spaces)
+  becomes one candidate with `"review_status": "unreviewed"`, the user's
+  comments, and the retrieved chunk ids. It has **no expected answer**, so it
+  is not a valid golden case yet.
+- Not exported: session ids, answers, source excerpts, and model details.
+- Re-running only appends new questions. Questions already exported, or already
+  in the golden dataset, are skipped, and your manual edits are kept.
+- The output file is git-ignored because it contains user questions and comments.
+
+> **Warning:** feedback candidates need human review. A thumbs-down can mean a
+> bad answer, a bad retrieval, or just a user who disliked the reply. Decide
+> what the correct answer is, find the supporting chunks yourself, then write a
+> proper case by hand. Never copy candidates into the golden dataset unchecked.
+
 ## What Stage 8 adds
 
 Stage 8 lets a user rate each generated answer so the system can be evaluated
@@ -349,16 +470,25 @@ developer-doc-assistant/
 │   ├── vector_store.py   ChromaDB storage, chunk ids, reset
 │   ├── retriever.py      similarity search, returns metadata
 │   └── generator.py      numbered sources, grounded answer, citations
+├── evaluation/
+│   ├── schemas.py           EvaluationCase (Pydantic)
+│   ├── dataset.py           load + validate the JSONL dataset
+│   └── candidates.py        feedback -> unreviewed candidates
 ├── services/
 │   └── feedback_service.py  SQLite feedback store (upsert, summary, listing)
 ├── scripts/
-│   └── view_feedback.py     developer viewer for saved feedback
+│   ├── view_feedback.py     developer viewer for saved feedback
+│   ├── validate_evaluation_dataset.py
+│   └── export_feedback_candidates.py
 ├── tests/
+│   ├── test_evaluation_dataset.py
+│   ├── test_feedback_candidates.py
 │   ├── test_feedback_service.py
 │   ├── test_generator.py
 │   └── test_ingestion.py
 ├── data/chroma/          persistent ChromaDB collection (git-ignored)
 ├── data/feedback.db      feedback ratings (git-ignored)
+├── data/evaluation/      golden_dataset.jsonl (committed)
 ├── app.py                Streamlit interface
 ├── .env                  OPENAI_API_KEY (git-ignored)
 └── requirements.txt

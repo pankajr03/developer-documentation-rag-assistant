@@ -6,7 +6,7 @@ This is a small learning project for building a RAG application incrementally. K
 
 ## Current milestone
 
-Stages 1-8 are implemented. The full RAG loop works: upload a document, index it
+Stages 1-9 are implemented. The full RAG loop works: upload a document, index it
 in ChromaDB, ask a question, and get an answer grounded in the retrieved chunks
 with citations back to the source.
 
@@ -22,6 +22,7 @@ with citations back to the source.
 - The UI shows each source in an expander with filename, page, section, chunk id, distance, and excerpt
 - Every answer has a UUID `response_id` (created in `generate_answer`). Users rate answers with thumbs up (1) or down (-1) plus an optional comment
 - `services/feedback_service.py` stores feedback in SQLite at `data/feedback.db`, one row per `response_id` (upsert); `scripts/view_feedback.py` inspects it
+- `evaluation/` loads the golden dataset `data/evaluation/golden_dataset.jsonl` (JSONL, Pydantic `EvaluationCase`); `scripts/validate_evaluation_dataset.py` validates it and `scripts/export_feedback_candidates.py` exports unreviewed thumbs-down candidates (human review required)
 - Tests live in `tests/` and mock the OpenAI client and ChromaDB, so they run offline
 
 Chunks indexed before Stage 7 lack `page` and `chunk_id`. Use the Maintenance
@@ -68,6 +69,7 @@ Run the tests with:
 6. Grounded answer generation from retrieved context only.
 7. Source citations, page and chunk metadata, and source display in the interface.
 8. Thumbs-up/down feedback on answers, saved in SQLite with a developer summary.
+9. Golden evaluation dataset (JSONL), validator, and feedback-candidate exporter. No scoring yet.
 
 ## Possible next tasks
 
@@ -78,4 +80,4 @@ Still one narrow change at a time.
 - Detect section headings in PDFs, not just Markdown; today PDF chunks usually have no section name.
 - Move from character-based chunking to sentence or paragraph boundaries so excerpts stop starting mid-sentence.
 - Manage multiple indexed documents: list them, delete one, and re-index without resetting the whole collection.
-- Evaluate answers using the saved feedback (Stage 9).
+- Score answers against the golden dataset: retrieval hit rate, keyword coverage, unanswerable handling (Stage 10).

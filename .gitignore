@@ -7,3 +7,4 @@ data/feedback.db
 data/feedback.db-shm
 data/feedback.db-wal
 data/feedback.db-journal
+data/evaluation/feedback_candidates.jsonl
