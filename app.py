@@ -1,11 +1,18 @@
+import logging
+
 import streamlit as st
 
-from rag.chunker import chunk_text
+from rag.chunker import chunk_sections
 from rag.embeddings import create_embeddings
-from rag.generator import NOT_FOUND_MESSAGE, generate_answer
-from rag.loader import load_document
+from rag.generator import FALLBACK_MESSAGE, generate_answer
+from rag.loader import load_document, section_text
 from rag.retriever import retrieve_chunks
-from rag.vector_store import get_collection_count, store_chunks
+from rag.vector_store import get_collection_count, reset_collection, store_chunks
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 st.set_page_config(
     page_title="Developer Documentation Assistant",
@@ -34,11 +41,12 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file:
     try:
-        extracted_text = load_document(uploaded_file)
+        sections = load_document(uploaded_file)
+        extracted_text = section_text(sections)
         if not extracted_text.strip():
             raise ValueError("The document contains no extractable text.")
 
-        chunks = chunk_text(extracted_text)
+        chunks = chunk_sections(sections)
         if not chunks:
             raise ValueError("The document did not produce any text chunks.")
 
@@ -52,13 +60,20 @@ if uploaded_file:
         st.write(f"Total extracted characters: {len(extracted_text)}")
         st.write(f"Total chunks: {len(chunks)}")
 
-        for index, chunk in enumerate(chunks, start=1):
-            with st.expander(f"Chunk {index}"):
-                st.text(chunk)
+        for chunk in chunks:
+            label = f"Chunk {chunk['chunk_index']}"
+            if chunk["page"] is not None:
+                label += f" — Page {chunk['page']}"
+            if chunk["section"]:
+                label += f" — {chunk['section']}"
+            with st.expander(label):
+                st.text(chunk["text"])
 
         if st.button("Create Embeddings"):
             try:
-                st.session_state.embeddings = create_embeddings(chunks)
+                st.session_state.embeddings = create_embeddings(
+                    [chunk["text"] for chunk in chunks]
+                )
             except ValueError as error:
                 st.error(str(error))
             except Exception as error:
@@ -122,13 +137,8 @@ if st.button("Ask"):
         st.error(
             "Could not search the documentation. Check your API key and try again.")
     else:
-        st.session_state.qa_result = {
-            "question": question,
-            "retrieved_chunks": retrieved_chunks,
-            "answer": None,
-        }
         try:
-            st.session_state.qa_result["answer"] = generate_answer(
+            st.session_state.qa_result = generate_answer(
                 question,
                 retrieved_chunks,
             )
@@ -141,24 +151,47 @@ qa_result = st.session_state.qa_result
 if qa_result is not None:
     st.write("Question:", qa_result["question"])
 
-    if qa_result["answer"] is not None:
-        st.subheader("Answer")
-        st.write(qa_result["answer"])
+    st.subheader("Answer")
+    st.write(qa_result["answer"])
 
     # Sources come straight from ChromaDB metadata, never from the LLM output.
     st.subheader("Sources")
-    if qa_result["answer"] == NOT_FOUND_MESSAGE:
-        st.caption("The answer was not found in these retrieved chunks.")
-    if not qa_result["retrieved_chunks"]:
+    if qa_result["answer"] == FALLBACK_MESSAGE:
+        st.caption(
+            "These chunks were searched but do not support an answer."
+        )
+    if not qa_result["sources"]:
         st.write("No documentation chunks were retrieved.")
 
-    seen_sources = set()
-    for result in qa_result["retrieved_chunks"]:
-        source_key = (result["source"], result["chunk_index"])
-        if source_key in seen_sources:
-            continue
-        seen_sources.add(source_key)
+    for source in qa_result["sources"]:
+        page_label = (
+            f"Page {source['page']}" if source["page"] is not None
+            else "Page not available"
+        )
+        with st.expander(
+            f"Source {source['number']} — {source['filename']} — {page_label}"
+        ):
+            st.write(f"File: {source['filename']}")
+            st.write(f"Page: {source['page'] if source['page'] is not None else 'Not available'}")
+            if source["section"]:
+                st.write(f"Section: {source['section']}")
+            st.write(f"Chunk ID: {source['chunk_id'] or 'Not available'}")
+            if source["distance"] is not None:
+                st.write(f"Distance: {source['distance']}")
+            st.text(source["content"])
 
-        with st.expander(f"{result['source']} — Chunk {result['chunk_index']}"):
-            st.write(f"Distance: {result['distance']}")
-            st.text(result["text"])
+with st.expander("Maintenance"):
+    st.write(
+        "Chunks indexed before Stage 7 have no page number or chunk id. "
+        "Reset the collection and re-upload those documents to add the "
+        "citation metadata."
+    )
+    st.write(f"Stored chunks: {get_collection_count()}")
+    if st.button("Reset Indexed Documents"):
+        try:
+            reset_collection()
+            st.session_state.stored_document = None
+            st.session_state.qa_result = None
+            st.success("The collection was reset. Re-upload your documents.")
+        except Exception as error:
+            st.error(f"Could not reset the collection: {error}")
