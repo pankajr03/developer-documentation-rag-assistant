@@ -2,6 +2,7 @@ import streamlit as st
 
 from rag.chunker import chunk_text
 from rag.embeddings import create_embeddings
+from rag.generator import NOT_FOUND_MESSAGE, generate_answer
 from rag.loader import load_document
 from rag.retriever import retrieve_chunks
 from rag.vector_store import get_collection_count, store_chunks
@@ -19,8 +20,8 @@ if "document_key" not in st.session_state:
     st.session_state.document_key = None
 if "stored_document" not in st.session_state:
     st.session_state.stored_document = None
-if "retrieval_results" not in st.session_state:
-    st.session_state.retrieval_results = None
+if "qa_result" not in st.session_state:
+    st.session_state.qa_result = None
 
 st.write(
     "Upload project documentation and ask questions about your project."
@@ -99,41 +100,65 @@ if uploaded_file:
     except Exception as error:
         st.error(f"Could not process the document: {error}")
 
-st.subheader("Search Indexed Documentation")
+st.subheader("Ask Documentation")
 question = st.text_input("Ask a question about the documentation")
 top_k = st.number_input(
-    "Number of results",
+    "Number of retrieved chunks",
     min_value=1,
     max_value=10,
     value=3,
     step=1,
 )
 
-if st.button("Search Documentation"):
+# The LLM is only called when the button is clicked. The result is kept in
+# session_state so reruns (e.g. opening an expander) do not repeat API calls.
+if st.button("Ask"):
+    st.session_state.qa_result = None
     try:
-        st.session_state.retrieval_results = retrieve_chunks(
-            question,
-            top_k=top_k,
-        )
-    except ValueError as error:
-        st.session_state.retrieval_results = None
-        st.error(str(error))
-    except RuntimeError as error:
-        st.session_state.retrieval_results = None
+        retrieved_chunks = retrieve_chunks(question, top_k=top_k)
+    except (ValueError, RuntimeError) as error:
         st.error(str(error))
     except Exception:
-        st.session_state.retrieval_results = None
-        st.error("Could not search the documentation. Check your API key and try again.")
+        st.error(
+            "Could not search the documentation. Check your API key and try again.")
+    else:
+        st.session_state.qa_result = {
+            "question": question,
+            "retrieved_chunks": retrieved_chunks,
+            "answer": None,
+        }
+        try:
+            st.session_state.qa_result["answer"] = generate_answer(
+                question,
+                retrieved_chunks,
+            )
+        except (ValueError, RuntimeError) as error:
+            st.error(str(error))
+        except Exception:
+            st.error("Could not generate an answer. Please try again.")
 
-retrieval_results = st.session_state.retrieval_results
-if retrieval_results is not None:
-    st.write(f"🔎 Retrieved {len(retrieval_results)} relevant chunks")
-    for index, result in enumerate(retrieval_results, start=1):
-        with st.expander(f"Result {index}"):
-            st.write(f"Source: {result['source']}")
-            st.write(f"Chunk: {result['chunk_index']}")
+qa_result = st.session_state.qa_result
+if qa_result is not None:
+    st.write("Question:", qa_result["question"])
+
+    if qa_result["answer"] is not None:
+        st.subheader("Answer")
+        st.write(qa_result["answer"])
+
+    # Sources come straight from ChromaDB metadata, never from the LLM output.
+    st.subheader("Sources")
+    if qa_result["answer"] == NOT_FOUND_MESSAGE:
+        st.caption("The answer was not found in these retrieved chunks.")
+    if not qa_result["retrieved_chunks"]:
+        st.write("No documentation chunks were retrieved.")
+
+    seen_sources = set()
+    for result in qa_result["retrieved_chunks"]:
+        source_key = (result["source"], result["chunk_index"])
+        if source_key in seen_sources:
+            continue
+        seen_sources.add(source_key)
+
+        with st.expander(f"{result['source']} — Chunk {result['chunk_index']}"):
             st.write(f"Distance: {result['distance']}")
             st.text(result["text"])
-
-if question:
-    st.write("Question:", question)
