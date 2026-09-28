@@ -25,6 +25,158 @@ ChromaDB (text + metadata)          generate_answer()
                                     Thumbs up/down + comment -> SQLite
 ```
 
+## What Stage 11 adds
+
+A polished **Streamlit** interface. It replaces the single-page app with four
+pages and a sidebar, and reuses the same RAG, feedback and evaluation code.
+Streamlit was kept because the app already used it, and version 1.64 has
+built-in navigation, chat, status and badge components, so no new dependency
+was needed.
+
+```text
+Sidebar                        Pages
+├── About + models             ├── Ask Documentation  chat with cited answers
+├── Knowledge-base status      ├── Manage Documents   upload, index, list, reset
+├── Retrieval settings         ├── Feedback           ratings summary (read-only)
+└── Clear conversation         └── Evaluation         Stage 10 reports (read-only)
+```
+
+UI code lives in `ui/` and never talks to OpenAI, ChromaDB or SQLite directly:
+
+- `ui/services.py`: the boundary. It calls `retrieve_chunks`, `generate_answer`,
+  `create_embeddings`, `store_chunks`, `save_feedback` and turns every error
+  into a short, user-safe message.
+- `ui/state.py`: chat history and feedback state in `st.session_state`.
+- `ui/validation.py`: question and upload validation, filename sanitising.
+- `ui/formatting.py`: source display data, excerpt truncation, safe Markdown.
+- `ui/reports.py`: read-only, path-safe access to evaluation reports.
+- `ui/components.py`: shared widgets (sources, feedback form, sidebar).
+- `ui/pages/`: one module per page. `app.py` only sets up navigation.
+- `ui/config.py`: limits and defaults (question length, upload size, `top_k`).
+
+### Start the app
+
+```powershell
+.\.venv\Scripts\streamlit.exe run app.py
+```
+
+Open http://localhost:8501. The only required environment variable is
+`OPENAI_API_KEY` in `.env` (see [Setup](#setup)). If it is missing, the app
+still starts and shows a warning; indexing and asking are the only actions
+that need it.
+
+### Supported documents and indexing
+
+PDF, TXT (UTF-8) and Markdown, up to **10 MB** each and 10 files per batch.
+On **Manage Documents**:
+
+1. Choose one or more files. Each is checked immediately (type, size, empty).
+2. Click **Index selected documents**. Nothing is embedded until you click,
+   so Streamlit reruns never cause paid API calls.
+3. A status box shows *Reading document → Creating chunks → Generating
+   embeddings → Saving to ChromaDB → Completed*.
+4. The result table lists each file as indexed, skipped or failed, with the
+   reason, plus files indexed, chunks created, skipped and errors. The
+   uploader is emptied so the same files are not indexed twice by accident.
+
+Duplicates are **skipped, never replaced**: a file whose document id (derived
+from its name, as before) is already indexed, or whose SHA-256 content hash
+matches an indexed file (new documents store a `content_hash` in their chunk
+metadata). To re-index a document, use **Maintenance → Reset indexed
+documents** (you must tick a confirmation box first; this deletes every
+indexed chunk but not feedback or reports), then upload again. Scanned PDFs
+without a text layer are skipped with "No usable text found".
+
+### Asking questions and citations
+
+On **Ask Documentation**, type into the chat box. Each question is checked
+(not empty, at most 1,000 characters), then the real retriever and generator
+run once. The answer, its sources and its feedback form are stored in the
+session, so opening a source or rating an answer never calls the model again.
+
+Under each answer, **Sources** lists every retrieved chunk in retrieval order,
+one expander each. Chunks the answer actually cites (from the generator's
+structured `citations`, not from searching the text) are marked **· cited**.
+Each expander shows only the fields that exist: document name, page, section,
+chunk id, document id, and *Distance (lower is closer)*, plus an excerpt of
+up to 400 characters (turn excerpts off in the sidebar). When the answer is
+the fallback message, the sources are labelled as searched but not
+supporting an answer. Warnings appear when an answer has no citations, or
+when the model cited a source number that was not retrieved (that citation
+is removed).
+
+The sidebar's **Chunks to retrieve** (1–10, default 3) only affects the chat.
+It never changes the Stage 10 evaluation configuration.
+
+### Feedback
+
+Every answer has **👍 Helpful** and **👎 Not helpful** buttons with an optional
+comment. A click saves once through `services/feedback_service.py`, tied to
+that answer's `response_id`, and the form is replaced by a confirmation, so
+the same answer cannot be rated twice in one session. If the database write
+fails, an error is shown, the answer stays visible, and you can try again.
+The **Feedback** page shows totals, the helpful percentage, and the latest
+10/25/50 ratings (date, rating, question preview, comment, sources, response
+id). It does not show answers or excerpts, and has no delete controls.
+
+### Evaluation reports
+
+The **Evaluation** page lists report folders from `reports/evaluation/`
+(newest first) and `reports/baseline/`, opens the newest by default, and
+shows the key metrics, failed or weak cases, a per-category table, and
+downloads of `summary.json`, `results.csv` and `failures.jsonl`. It never
+runs an evaluation and never writes to reports; run one with
+`scripts/run_rag_evaluation.py` (see Stage 10). Missing or malformed reports
+show a message instead of an error.
+
+### Clear the conversation
+
+**Clear conversation** in the sidebar removes this browser session's chat
+only. Documents, ChromaDB, saved feedback and evaluation reports are kept.
+
+### Common messages
+
+| Message | What to do |
+| --- | --- |
+| *No documentation is indexed yet* | Index a document on Manage Documents. |
+| *The OpenAI API key is missing* | Add `OPENAI_API_KEY` to `.env` and restart. |
+| *OpenAI rejected the API key* | Check the key in `.env`. |
+| *OpenAI is rate-limiting requests, or the account has no credits left* | Wait, or check billing. |
+| *The request to OpenAI timed out* / *Could not reach OpenAI* | Check the network and retry. |
+| *The document database (ChromaDB) could not be opened* | Check `data/chroma`; restart the app. |
+| *Could not extract text from this file* | The PDF is damaged or encrypted. |
+| *The text file is not UTF-8 encoded* | Re-save the file as UTF-8. |
+| *Could not reach the feedback database* | Check `data/feedback.db` is not locked. |
+
+### Security measures
+
+- Upload type, size (also enforced by `server.maxUploadSize` in
+  `.streamlit/config.toml`) and emptiness are validated before any processing.
+- Uploaded files are processed in memory. The browser-supplied filename is
+  sanitised for display and ids and is never used as a filesystem path.
+- Document text (excerpts, filenames, sections) is shown literally or with
+  Markdown escaped; raw HTML is never enabled. Image embeds in answers are
+  reduced to their alt text, so a malicious document cannot make the browser
+  load an external image.
+- Report selection uses an allow-list of discovered folders, and resolved
+  paths must stay inside the report folders, so path traversal is rejected.
+  Only three report files can be downloaded.
+- The ChromaDB path is fixed in code. The status panel uses a read-only
+  lookup that never creates a collection.
+- Errors shown to users are fixed messages. Logs record exception type names
+  only, never API keys, exception text or document content.
+
+### Local-development limitations
+
+- No authentication. Anyone who can open the app can index documents, reset
+  the collection and see the Feedback and Evaluation pages. Run it on
+  localhost only.
+- Chat history lives in the browser session and is lost on refresh.
+- Indexing and answering run inside the Streamlit request, so a large PDF
+  blocks that browser tab until it finishes.
+- There is no relevance threshold yet: every retrieved chunk is listed.
+- Re-indexing one document requires resetting the whole collection.
+
 ## What Stage 10 adds
 
 **Automated RAG evaluation.** Every golden case from Stage 9 is run through the
@@ -451,6 +603,10 @@ The result now looks like:
 4. To change your mind, pick the other thumb and/or edit the comment and click
    **Submit feedback** again. The saved row is updated, not duplicated.
 
+Since Stage 11 the interface uses **👍 Helpful / 👎 Not helpful** buttons and
+accepts one rating per answer per session (see Stage 11). The service still
+upserts, so a row is never duplicated.
+
 Submitting feedback only writes to SQLite. It does not call the retriever or the
 LLM, and the answer and sources stay on screen.
 
@@ -620,7 +776,8 @@ Source 1 — speed_schedule.pdf — Page 3
 ```
 
 Source details come from ChromaDB metadata, never from the model, so a filename
-or page number cannot be hallucinated. When the answer is the fallback message,
+or page number cannot be hallucinated. Since Stage 11 each source is an
+expander labelled like `[1] speed_schedule.pdf — page 3 · cited`. When the answer is the fallback message,
 the searched sources are still listed, labeled as not supporting an answer.
 
 ## Setup
@@ -651,7 +808,8 @@ Or without activating the virtual environment:
 .\.venv\Scripts\streamlit.exe run app.py
 ```
 
-The app runs at http://localhost:8501.
+The app runs at http://localhost:8501. Use the sidebar to move between
+**Ask Documentation**, **Manage Documents**, **Feedback** and **Evaluation**.
 
 ## Run the tests
 
@@ -669,6 +827,12 @@ Stage 10 evaluation tests only (fake retriever and generator, no API calls):
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest tests.test_evaluation_metrics tests.test_evaluation_runner tests.test_evaluation_reporter tests.test_evaluation_cli -v
+```
+
+Stage 11 interface tests only (fakes and temporary folders, no API calls):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_ui_helpers tests.test_ui_services tests.test_ui_reports tests.test_ui_app -v
 ```
 
 Feedback tests only:
@@ -754,6 +918,10 @@ developer-doc-assistant/
 │   ├── test_evaluation_metrics.py
 │   ├── test_evaluation_reporter.py
 │   ├── test_evaluation_runner.py
+│   ├── test_ui_app.py        Streamlit AppTest smoke tests
+│   ├── test_ui_helpers.py
+│   ├── test_ui_reports.py
+│   ├── test_ui_services.py
 │   ├── test_feedback_candidates.py
 │   ├── test_feedback_service.py
 │   ├── test_generator.py
@@ -763,7 +931,17 @@ developer-doc-assistant/
 ├── data/evaluation/      golden_dataset.jsonl (committed)
 ├── reports/baseline/     Stage 10 baseline report
 ├── reports/evaluation/   timestamped evaluation runs (git-ignored)
-├── app.py                Streamlit interface
+├── ui/
+│   ├── config.py         UI limits and defaults
+│   ├── services.py       boundary to rag/services/evaluation, safe errors
+│   ├── state.py          chat and feedback session state
+│   ├── validation.py     question/upload validation, filename sanitising
+│   ├── formatting.py     source display, excerpts, safe Markdown
+│   ├── reports.py        read-only evaluation report access
+│   ├── components.py     shared widgets and sidebar
+│   └── pages/            ask.py, documents.py, feedback.py, evaluation.py
+├── .streamlit/config.toml  upload size limit
+├── app.py                Streamlit entry point and navigation
 ├── .env                  OPENAI_API_KEY (git-ignored)
 └── requirements.txt
 ```
@@ -786,4 +964,5 @@ developer-doc-assistant/
   cited source was wrong. There is no login, so `session_id` only identifies a
   browser session, and anyone who can open the app can rate.
 - Every retrieved chunk is listed as a source, including ones the answer did not
-  cite. There is no relevance threshold yet.
+  cite (cited ones are marked). There is no relevance threshold yet.
+- The interface has no authentication and is meant for localhost only.

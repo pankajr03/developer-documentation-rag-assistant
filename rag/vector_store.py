@@ -45,8 +45,13 @@ def store_chunks(
     embeddings: Sequence[Sequence[float]],
     source: str,
     document_id: Optional[str] = None,
+    content_hash: Optional[str] = None,
 ) -> int:
-    """Upsert chunks, embeddings, and source metadata into ChromaDB."""
+    """Upsert chunks, embeddings, and source metadata into ChromaDB.
+
+    content_hash (optional) is stored on every chunk so the same file can be
+    recognised later, even when it is uploaded under a different name.
+    """
     if not chunks:
         raise ValueError("Cannot store an empty chunk list.")
     if not embeddings:
@@ -81,6 +86,8 @@ def store_chunks(
             metadata["page"] = chunk["page"]
         if chunk["section"]:
             metadata["section"] = chunk["section"]
+        if content_hash:
+            metadata["content_hash"] = content_hash
 
         ids.append(chunk_id)
         documents.append(chunk["text"])

@@ -1,0 +1,3 @@
+[server]
+# Keep in sync with MAX_UPLOAD_MB in ui/config.py.
+maxUploadSize = 10

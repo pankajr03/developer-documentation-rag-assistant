@@ -6,11 +6,11 @@ This is a small learning project for building a RAG application incrementally. K
 
 ## Current milestone
 
-Stages 1-10 are implemented. The full RAG loop works: upload a document, index it
+Stages 1-11 are implemented. The full RAG loop works: upload a document, index it
 in ChromaDB, ask a question, and get an answer grounded in the retrieved chunks
 with citations back to the source.
 
-- Streamlit app in `app.py`; virtual environment at `.venv`; dependencies in `requirements.txt`
+- Streamlit app: `app.py` sets up `st.navigation` over four pages in `ui/pages/` (Ask Documentation, Manage Documents, Feedback, Evaluation); pages call `ui/services.py`, which wraps the rag/services/evaluation modules and returns user-safe errors. Session state helpers are in `ui/state.py`, limits in `ui/config.py`; virtual environment at `.venv`; dependencies in `requirements.txt`
 - `rag/loader.py` extracts text from TXT, Markdown, and PDF, one section per PDF page
 - `rag/chunker.py` splits text into overlapping chunks, keeping page number and Markdown heading
 - `rag/embeddings.py` creates embeddings with `text-embedding-3-small` and loads the API key from `.env`
@@ -19,7 +19,8 @@ with citations back to the source.
 - `rag/generator.py` builds numbered sources and answers with `gpt-5.4-mini` via the OpenAI Responses API
 - Answers are grounded only in retrieved context; when the context does not support an answer the app returns a fixed fallback message
 - Each stored chunk carries `source`, `document_id`, `chunk_id`, `chunk_index`, plus `page` and `section` when available; missing metadata is omitted, never invented
-- The UI shows each source in an expander with filename, page, section, chunk id, distance, and excerpt
+- The UI shows each source in an expander with filename, page, section, chunk id, distance, and excerpt, marking the ones the answer cited
+- Indexing runs only on the "Index selected documents" click; duplicates (same document id or `content_hash` metadata) are skipped, never replaced
 - Every answer has a UUID `response_id` (created in `generate_answer`). Users rate answers with thumbs up (1) or down (-1) plus an optional comment
 - `services/feedback_service.py` stores feedback in SQLite at `data/feedback.db`, one row per `response_id` (upsert); `scripts/view_feedback.py` inspects it
 - `evaluation/` loads the golden dataset `data/evaluation/golden_dataset.jsonl` (JSONL, Pydantic `EvaluationCase`); `scripts/validate_evaluation_dataset.py` validates it and `scripts/export_feedback_candidates.py` exports unreviewed thumbs-down candidates (human review required)
@@ -73,14 +74,14 @@ Run the tests with:
 8. Thumbs-up/down feedback on answers, saved in SQLite with a developer summary.
 9. Golden evaluation dataset (JSONL), validator, and feedback-candidate exporter.
 10. Automated RAG evaluation against the golden dataset, with a committed baseline report.
+11. Polished multipage Streamlit interface: chat, document management, feedback summary, evaluation reports.
 
 ## Possible next tasks
 
 Still one narrow change at a time.
 
 - Filter out weakly matching chunks with a relevance threshold, instead of listing every retrieved chunk as a source.
-- Show which sources the answer actually cited, separately from the ones merely searched.
+- Allow deleting or re-indexing one document without resetting the whole collection.
 - Detect section headings in PDFs, not just Markdown; today PDF chunks usually have no section name.
 - Move from character-based chunking to sentence or paragraph boundaries so excerpts stop starting mid-sentence.
-- Manage multiple indexed documents: list them, delete one, and re-index without resetting the whole collection.
 - Improve weak baseline cases (low MRR on table chunks, incorrect abstention on eval_006), comparing each change with `reports/baseline/`.

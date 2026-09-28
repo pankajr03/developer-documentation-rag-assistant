@@ -113,6 +113,15 @@ class StoreChunksTests(unittest.TestCase):
         self.assertNotIn("section", metadata)
         self.assertEqual(metadata["chunk_id"], "guide_c0")
 
+    def test_stores_content_hash_only_when_given(self):
+        store_chunks(["one"], [[0.1]], "guide.md")
+        self.assertNotIn("content_hash",
+                         self.collection.upsert.call_args.kwargs["metadatas"][0])
+        store_chunks(["one"], [[0.1]], "guide.md", content_hash="abc123")
+        self.assertEqual(
+            self.collection.upsert.call_args.kwargs["metadatas"][0]["content_hash"],
+            "abc123")
+
     def test_accepts_plain_string_chunks(self):
         store_chunks(["one", "two"], [[0.1], [0.2]], "guide.md")
         self.assertEqual(self._upsert_kwargs()["ids"], ["guide_c0", "guide_c1"])
