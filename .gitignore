@@ -8,3 +8,6 @@ data/feedback.db-shm
 data/feedback.db-wal
 data/feedback.db-journal
 data/evaluation/feedback_candidates.jsonl
+
+# Stage 10 evaluation runs (the committed baseline lives in reports/baseline/)
+reports/evaluation/

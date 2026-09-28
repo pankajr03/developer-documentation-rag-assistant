@@ -111,8 +111,9 @@ class GenerateAnswerTests(unittest.TestCase):
             "What is the reporting-time rule?", CHUNKS, top_k=3)
 
         self.assertEqual(set(result), {
-            "response_id", "question", "answer", "sources",
-            "retrieved_chunks", "model_name", "retrieval_top_k",
+            "response_id", "question", "answer", "sources", "citations",
+            "unverified_citation_numbers", "retrieved_chunks", "model_name",
+            "retrieval_top_k",
         })
         self.assertEqual(result["model_name"], MODEL_NAME)
         self.assertEqual(result["retrieval_top_k"], 3)
@@ -153,6 +154,35 @@ class GenerateAnswerTests(unittest.TestCase):
         answer = generate_answer("Reporting time?", CHUNKS)["answer"]
         self.assertIn("[Source 1]", answer)
         self.assertNotIn("[Source 7]", answer)
+
+    @patch("rag.generator._create_client")
+    def test_returns_structured_citations_for_cited_sources_only(
+            self, create_client):
+        create_client.return_value.responses.create.return_value = _response(
+            "Late reports are logged [Source 2]. Crew report early [Source 2].")
+        result = generate_answer("Reporting time?", CHUNKS)
+        self.assertEqual(result["citations"], [{
+            "number": 2,
+            "filename": "speed_schedule.pdf",
+            "page": 3,
+            "chunk_id": "speed_schedule_p3_c3",
+            "document_id": "speed_schedule",
+        }])
+        self.assertEqual(result["unverified_citation_numbers"], [])
+
+    @patch("rag.generator._create_client")
+    def test_records_citations_to_sources_that_were_not_retrieved(
+            self, create_client):
+        create_client.return_value.responses.create.return_value = _response(
+            "Crew report early [Source 1] [Source 7].")
+        result = generate_answer("Reporting time?", CHUNKS)
+        self.assertEqual([c["number"] for c in result["citations"]], [1])
+        self.assertEqual(result["unverified_citation_numbers"], [7])
+
+    def test_fallback_without_chunks_has_no_citations(self):
+        result = generate_answer("Does it use Redis?", [])
+        self.assertEqual(result["citations"], [])
+        self.assertEqual(result["unverified_citation_numbers"], [])
 
     @patch("rag.generator._create_client")
     def test_empty_model_response_raises(self, create_client):

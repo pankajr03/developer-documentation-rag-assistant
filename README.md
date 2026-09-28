@@ -25,6 +25,261 @@ ChromaDB (text + metadata)          generate_answer()
                                     Thumbs up/down + comment -> SQLite
 ```
 
+## What Stage 10 adds
+
+**Automated RAG evaluation.** Every golden case from Stage 9 is run through the
+app's real pipeline (`rag.retriever.retrieve_chunks`, then
+`rag.generator.generate_answer`), and the results are scored against the
+golden labels. There is no separate "evaluation pipeline": if the app changes,
+the evaluation measures the change.
+
+```text
+Golden case -> retrieve top-k -> retrieval metrics
+            -> generate answer -> answer, citation, grounding, abstention metrics
+            -> per-case result -> summary report
+```
+
+Only the **question** (and `top_k`) is sent to the retriever and generator.
+`expected_answer`, `expected_keywords`, `expected_source_ids`, `answerable` and
+`notes` are used only for scoring afterwards, so the model can never see the
+answer key (no evaluation-data leakage). A test checks this.
+
+An evaluation run only **reads** ChromaDB. It never re-embeds or re-indexes
+documents, never edits the golden dataset, and never opens the feedback database.
+
+- `evaluation/config.py`: `EvaluationConfig`, thresholds, accepted fallback phrases.
+- `evaluation/metrics.py`: deterministic metrics (no LLM).
+- `evaluation/judge.py`: optional LLM judge.
+- `evaluation/results.py`: `CaseResult` and `MetricSummary` schemas.
+- `evaluation/runner.py`: `run_evaluation(dataset_path, config)`.
+- `evaluation/reporter.py`: report files.
+- `scripts/run_rag_evaluation.py`: the CLI.
+
+`generate_answer` now also returns `citations` (the retrieved sources the final
+answer cites, with chunk ids) and `unverified_citation_numbers` (source numbers
+the model cited that were never retrieved; they are still removed from the
+answer). The Streamlit display is unchanged.
+
+### Retrieval evaluation vs answer evaluation
+
+- **Retrieval evaluation** asks: did the search find a chunk that contains the
+  answer? It needs only embeddings and ChromaDB, is cheap, and is deterministic
+  for a fixed index. Run it alone with `--skip-generation`.
+- **Answer evaluation** asks: given those chunks, did the model answer well,
+  cite correctly, and refuse when it should? It costs one generation call per
+  case.
+
+A bad answer with a good retrieval score points at the prompt or model. A bad
+retrieval score points at chunking, embeddings or `top_k`.
+
+### Retrieval metrics (answerable cases only)
+
+A retrieved chunk is **relevant** when its `chunk_id` exactly equals one of the
+case's `expected_source_ids` (after trimming and lower-casing). A `document_id`
+match also counts, for datasets that list whole documents. The filename is
+compared with `expected_source_titles` only when a chunk has no stable id at
+all. There is no substring matching, so `doc_p1_c1` never matches `doc_p1_c12`.
+Each result records which expected id matched and which metadata fields were
+missing.
+
+- **Source hit**: 1 if any retrieved chunk is relevant, else 0.
+- **Hit@k** (k = 1, 3, 5): 1 if a relevant chunk is in the first k results.
+  Hit@k is `null` when fewer than k results were *requested* (`--top-k 3`
+  cannot measure Hit@5). If the collection holds fewer than k chunks, every
+  chunk was searched, so Hit@k is still measured.
+- **MRR** (Mean Reciprocal Rank): for each case, `1 / rank` of the first
+  relevant chunk (0 if none), averaged. First relevant chunk at rank 2 gives
+  0.5. MRR rewards putting the right chunk *first*, which Hit@5 does not.
+
+### Answer metrics (deterministic)
+
+- **Keyword coverage** = matched expected keywords / total expected keywords.
+  Case-insensitive, extra spaces ignored, whole words or phrases only (`with`
+  does not match `without`). `null` when a case has no expected keywords.
+  Matched and missing keywords are stored per case.
+- **Citation precision** = citations pointing at a retrieved chunk / all
+  citations the model made (including stripped `[Source N]` numbers that were
+  never retrieved). Summed over all cases (micro-average). Only the structured
+  `citations` are used; naming a document in the answer text earns nothing.
+- **Expected-source citation hit**: the answer cites at least one expected chunk.
+- **Grounding check** (conservative): has retrieved context, has citations,
+  citations all refer to retrieved chunks, fallback used, and whether an
+  answer was given without useful evidence. `grounded` is true only for a
+  non-fallback answer that cites retrieved chunks and nothing else. This is
+  citation-level grounding: it does **not** prove every sentence is supported.
+
+### Abstention evaluation
+
+For `answerable: false` cases the right behaviour is the fallback message.
+An answer **abstained** when it contains an accepted fallback phrase
+(`DEFAULT_FALLBACK_PHRASES` in `evaluation/config.py`; case, punctuation and
+spacing are ignored). It is a **correct abstention** only if it also cites no
+chunks, so the model did not present retrieved text as evidence. Retrieval
+hit metrics are not computed for these cases (there is nothing to find), but
+the retrieved chunks are still stored for inspection.
+
+For answerable cases, abstaining is counted as an **incorrect abstention**.
+
+### Limitations of deterministic metrics
+
+- Keyword coverage checks wording, not truth: "One lap" misses the keyword
+  `1 lap`, and an answer can contain every keyword and still be wrong.
+- A citation to a retrieved chunk does not prove that chunk supports the claim.
+- Relevance is only as good as `expected_source_ids`. If a fact also appears in
+  a chunk nobody listed, retrieving that chunk counts as a miss. Chunk ids also
+  change when a document is re-chunked, so re-check the dataset after re-indexing.
+
+### Optional LLM judge
+
+`--use-llm-judge` adds a second model call per case that scores the answer
+against the reference answer and the retrieved context:
+
+| Field | Scale |
+| --- | --- |
+| `correctness` | 0 wrong, 1 mostly wrong, 2 partly right, 3 mostly right, 4 fully right |
+| `grounding` | 0 unsupported ... 4 every claim supported by the context |
+| `relevance` | 0 off-topic ... 4 directly answers the question |
+| `unsupported_claims` | `true` if any claim is not in the context |
+| `reason` | short explanation |
+
+It uses the project's OpenAI client, structured output validated with Pydantic
+(`JudgeVerdict`), temperature 0 (retried without it if a model rejects it), and
+`gpt-5.4-mini` by default (`--judge-model` to change). The model and temperature
+are written to `summary.json`.
+
+It is **off by default** because it doubles the API cost and can vary between
+runs. Judge scores are model-based estimates, not objective truth: in testing,
+the judge gave a wrong refusal a relevance of 4 despite being told not to.
+A judge failure is recorded on that case (`judge_error`) and the run continues.
+Judge scores never change the deterministic metrics. By default the judge is
+the same model as the generator, which may be lenient toward its own answers.
+
+### Run an evaluation
+
+Full evaluation (retrieval + answers, about one embedding call and one
+generation call per case):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --dataset data\evaluation\golden_dataset.jsonl --top-k 5
+```
+
+Retrieval only (embedding calls only, no generation):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --skip-generation
+```
+
+Filter cases (filters combine; order is case ids, category, difficulty, max):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --category race_distances --max-cases 3
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --difficulty advanced
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --case-id eval_006 --case-id eval_019
+```
+
+An unknown case id, a filter that matches nothing, an empty dataset, or
+`--top-k 0` stops with a clear message. Add `-v` to see progress logs.
+
+From Python:
+
+```python
+from evaluation.config import EvaluationConfig
+from evaluation.runner import run_evaluation
+
+run = run_evaluation("data/evaluation/golden_dataset.jsonl",
+                     EvaluationConfig(top_k=5, generate_answers=False))
+print(run.summary["metrics"]["mrr"], run.report_dir)
+```
+
+`run_evaluation` also accepts `retrieve=`, `generate=` and `judge=` callables,
+which the tests use to run offline with fakes.
+
+### Thresholds and exit codes
+
+No threshold is checked unless you ask for one:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --fail-below-source-hit 0.8 --fail-below-mrr 0.6 --fail-below-keyword-coverage 0.6 --fail-below-abstention 0.8
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --recommended-thresholds
+```
+
+`--recommended-thresholds` applies the suggested starting points in
+`RECOMMENDED_THRESHOLDS` (`evaluation/config.py`); explicit `--fail-below-*`
+flags override them. They are starting points for this small dataset, not
+universal targets. A metric that could not be measured (for example keyword
+coverage with `--skip-generation`) fails its threshold.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | PASS: all configured thresholds met and case errors at most `--max-case-errors` |
+| `1` | FAIL: a threshold was missed or too many cases raised errors (reports are still written) |
+| `2` | Could not run: invalid configuration, dataset not loadable, or ChromaDB collection missing or empty (no reports written) |
+
+**Case-error policy:** an error in one case (for example an API timeout) is
+stored on that case and the run continues. By default any case error makes the
+run FAIL (`--max-case-errors 0`), because a metric computed over fewer cases is
+not comparable with the baseline. Raise the limit to tolerate flaky cases.
+
+### Reports
+
+Each run writes a new folder `reports/evaluation/YYYY-MM-DD_HHMMSS/` (a suffix
+such as `_2` is added if the name is taken, so earlier runs are never
+overwritten). `--output-dir` changes the parent folder; `--run-dir PATH` uses an
+exact folder, which must be new or empty.
+
+| File | Contents |
+| --- | --- |
+| `summary.json` | timestamp, dataset path and counts, config, models, collection, metrics, breakdowns by category / difficulty / answerability, errors, thresholds, PASS/FAIL, package versions and git commit |
+| `results.jsonl` | one complete `CaseResult` per case: retrieved chunks with match details, answer, citations, every metric, latencies, errors |
+| `results.csv` | the key flat fields, for a spreadsheet |
+| `failures.jsonl` | cases with `failure_reasons`: `error`, `missed_expected_sources`, `low_keyword_coverage` (below 0.5), `incorrect_citations`, `failed_abstention`, `incorrect_abstention` |
+
+Reports contain questions, answers and chunk ids, but no API keys, prompts or
+environment variables. `reports/evaluation/` is git-ignored; the baseline in
+`reports/baseline/` is meant to be committed.
+
+### Baseline (2026-09-28)
+
+The first run, on the existing system with no tuning:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_rag_evaluation.py --top-k 5 --run-dir reports\baseline --recommended-thresholds
+```
+
+Configuration: `top_k` 5, `text-embedding-3-small`, collection
+`developer_docs` (13 chunks of `Speed Schedule (1).pdf`), generator
+`gpt-5.4-mini`, no judge, git commit `beb884c`. The app's own default is
+`top_k` 3. Hit@3 shows how retrieval does at that setting (the ranking is
+the same), but the answers here were generated from 5 chunks.
+
+| Metric | Value |
+| --- | --- |
+| Cases (answerable / unanswerable) | 23 (18 / 5), 0 errors |
+| Source-hit rate (= Hit@5) | 1.000 |
+| Hit@1 / Hit@3 | 0.500 / 0.667 |
+| MRR | 0.640 |
+| Keyword coverage | 0.799 |
+| Citation precision | 1.000 |
+| Expected-source citation hit | 0.833 |
+| Correct abstention rate | 1.000 (5 / 5) |
+| Incorrect abstentions | 1 (`eval_006`) |
+| Avg retrieval / total latency | 474 ms / 1966 ms |
+
+Weak cases: `eval_006` refused although the right chunk was ranked first (the
+answer needs 3 x 200m = 600m, combining two facts); `eval_005` and `eval_007`
+gave correct but terse answers (low keyword coverage, and "One lap" does not
+match the keyword `1 lap`); `race_distances` questions have the lowest MRR
+(0.24), with the relevant table chunks often at rank 4 or 5.
+
+### Compare with the baseline
+
+After a change (chunking, `top_k`, prompt, model), run the same command into a
+new folder and compare `metrics` in the two `summary.json` files, then the
+per-case rows in `results.csv`. Change one thing at a time, keep the dataset
+unchanged between the runs you compare, and remember that answer metrics can
+move a little between identical runs because generation is not fully
+deterministic.
+
 ## What Stage 9 adds
 
 A **golden evaluation dataset**: a version-controlled set of questions with the
@@ -78,8 +333,7 @@ Rules enforced by the loader:
 `expected_source_ids` uses **chunk ids** (for example `speed_schedule_1_p1_c2`),
 the same ids shown as *Chunk ID* in the app. When a fact is repeated (like the
 reporting-time rule), every chunk containing it is listed, and retrieving *any
-one* of them counts as finding the source. How that is scored is decided in the
-next stage.
+one* of them counts as finding the source (Stage 10 scores it this way).
 
 Example case (source list shortened):
 
@@ -411,6 +665,12 @@ Or a single module:
 .\.venv\Scripts\python.exe -m unittest tests.test_generator -v
 ```
 
+Stage 10 evaluation tests only (fake retriever and generator, no API calls):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_evaluation_metrics tests.test_evaluation_runner tests.test_evaluation_reporter tests.test_evaluation_cli -v
+```
+
 Feedback tests only:
 
 ```powershell
@@ -473,15 +733,27 @@ developer-doc-assistant/
 ├── evaluation/
 │   ├── schemas.py           EvaluationCase (Pydantic)
 │   ├── dataset.py           load + validate the JSONL dataset
-│   └── candidates.py        feedback -> unreviewed candidates
+│   ├── candidates.py        feedback -> unreviewed candidates
+│   ├── config.py            EvaluationConfig, thresholds, fallback phrases
+│   ├── metrics.py           deterministic retrieval + answer metrics
+│   ├── judge.py             optional LLM judge
+│   ├── results.py           CaseResult, MetricSummary
+│   ├── runner.py            run_evaluation()
+│   └── reporter.py          summary.json, results.jsonl/.csv, failures.jsonl
 ├── services/
 │   └── feedback_service.py  SQLite feedback store (upsert, summary, listing)
 ├── scripts/
 │   ├── view_feedback.py     developer viewer for saved feedback
 │   ├── validate_evaluation_dataset.py
-│   └── export_feedback_candidates.py
+│   ├── export_feedback_candidates.py
+│   └── run_rag_evaluation.py  Stage 10 evaluation CLI
 ├── tests/
+│   ├── evaluation_fakes.py   fake retriever/generator for offline tests
+│   ├── test_evaluation_cli.py
 │   ├── test_evaluation_dataset.py
+│   ├── test_evaluation_metrics.py
+│   ├── test_evaluation_reporter.py
+│   ├── test_evaluation_runner.py
 │   ├── test_feedback_candidates.py
 │   ├── test_feedback_service.py
 │   ├── test_generator.py
@@ -489,6 +761,8 @@ developer-doc-assistant/
 ├── data/chroma/          persistent ChromaDB collection (git-ignored)
 ├── data/feedback.db      feedback ratings (git-ignored)
 ├── data/evaluation/      golden_dataset.jsonl (committed)
+├── reports/baseline/     Stage 10 baseline report
+├── reports/evaluation/   timestamped evaluation runs (git-ignored)
 ├── app.py                Streamlit interface
 ├── .env                  OPENAI_API_KEY (git-ignored)
 └── requirements.txt
@@ -500,6 +774,7 @@ developer-doc-assistant/
 | --- | --- | --- |
 | Embeddings | `text-embedding-3-small` | `rag/embeddings.py` (`MODEL_NAME`) |
 | Answer generation | `gpt-5.4-mini` | `rag/generator.py` (`MODEL_NAME`) |
+| Evaluation judge (optional) | `gpt-5.4-mini` | `evaluation/judge.py` (`DEFAULT_JUDGE_MODEL`), or `--judge-model` |
 
 ## Known limitations
 

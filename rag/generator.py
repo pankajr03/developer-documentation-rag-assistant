@@ -84,6 +84,32 @@ def build_context(sources: list[Source]) -> str:
     return "\n\n\n".join(blocks)
 
 
+def cited_source_numbers(answer: str) -> list[int]:
+    """Return the [Source N] numbers in an answer, in first-seen order."""
+    numbers: list[int] = []
+    for match in CITATION_PATTERN.finditer(answer):
+        number = int(match.group(1))
+        if number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
+def build_citations(answer: str, sources: list[Source]) -> list[Source]:
+    """Structured metadata for each retrieved source the answer cites."""
+    by_number = {source["number"]: source for source in sources}
+    return [
+        {
+            "number": number,
+            "filename": by_number[number]["filename"],
+            "page": by_number[number]["page"],
+            "chunk_id": by_number[number]["chunk_id"],
+            "document_id": by_number[number]["document_id"],
+        }
+        for number in cited_source_numbers(answer)
+        if number in by_number
+    ]
+
+
 def _strip_unknown_citations(answer: str, valid_numbers: set[int]) -> str:
     """Remove citations pointing at source numbers that were not retrieved."""
 
@@ -108,6 +134,7 @@ def _build_result(
     sources: list[Source],
     retrieved_chunks: list[dict[str, Any]],
     top_k: Optional[int],
+    unverified_citation_numbers: Optional[list[int]] = None,
 ) -> dict[str, Any]:
     """Assemble the structured result, including a new unique response id."""
     return {
@@ -115,6 +142,8 @@ def _build_result(
         "question": question,
         "answer": answer,
         "sources": sources,
+        "citations": build_citations(answer, sources),
+        "unverified_citation_numbers": unverified_citation_numbers or [],
         "retrieved_chunks": retrieved_chunks,
         "model_name": MODEL_NAME,
         "retrieval_top_k": top_k,
@@ -128,8 +157,12 @@ def generate_answer(
 ) -> dict[str, Any]:
     """Answer a question from retrieved chunks only, with numbered citations.
 
-    Returns {"response_id", "question", "answer", "sources",
-    "retrieved_chunks", "model_name", "retrieval_top_k"}. The response id is
+    Returns {"response_id", "question", "answer", "sources", "citations",
+    "unverified_citation_numbers", "retrieved_chunks", "model_name",
+    "retrieval_top_k"}. "citations" lists the sources the final answer cites;
+    "unverified_citation_numbers" records citations the model made to source
+    numbers that were not retrieved (they are removed from the answer). The
+    response id is
     created here, once per answer, so feedback can be tied to it. Sources come
     from ChromaDB metadata, never from the model, so citations cannot name a
     document that was not retrieved. top_k is recorded only; it is not used
@@ -182,8 +215,13 @@ def generate_answer(
     if getattr(response, "status", "completed") != "completed" or not answer:
         raise RuntimeError("OpenAI returned an empty or incomplete answer.")
 
-    answer = _strip_unknown_citations(
-        answer, {source["number"] for source in sources})
+    valid_numbers = {source["number"] for source in sources}
+    unverified = [
+        number for number in cited_source_numbers(answer)
+        if number not in valid_numbers
+    ]
+    answer = _strip_unknown_citations(answer, valid_numbers)
     logger.info("Generated an answer from %d sources.", len(sources))
 
-    return _build_result(question, answer, sources, retrieved_chunks, top_k)
+    return _build_result(
+        question, answer, sources, retrieved_chunks, top_k, unverified)

@@ -6,7 +6,7 @@ This is a small learning project for building a RAG application incrementally. K
 
 ## Current milestone
 
-Stages 1-9 are implemented. The full RAG loop works: upload a document, index it
+Stages 1-10 are implemented. The full RAG loop works: upload a document, index it
 in ChromaDB, ask a question, and get an answer grounded in the retrieved chunks
 with citations back to the source.
 
@@ -23,6 +23,8 @@ with citations back to the source.
 - Every answer has a UUID `response_id` (created in `generate_answer`). Users rate answers with thumbs up (1) or down (-1) plus an optional comment
 - `services/feedback_service.py` stores feedback in SQLite at `data/feedback.db`, one row per `response_id` (upsert); `scripts/view_feedback.py` inspects it
 - `evaluation/` loads the golden dataset `data/evaluation/golden_dataset.jsonl` (JSONL, Pydantic `EvaluationCase`); `scripts/validate_evaluation_dataset.py` validates it and `scripts/export_feedback_candidates.py` exports unreviewed thumbs-down candidates (human review required)
+- `evaluation/runner.py` runs golden cases through the real `retrieve_chunks` and `generate_answer` (question only, no golden labels) and scores Hit@k, MRR, keyword coverage, citations, grounding and abstention; `scripts/run_rag_evaluation.py` is the CLI (`--skip-generation`, filters, `--fail-below-*` thresholds, optional `--use-llm-judge`). Reports go to `reports/evaluation/<timestamp>/` (git-ignored); the baseline is in `reports/baseline/`
+- `generate_answer` also returns structured `citations` and `unverified_citation_numbers`
 - Tests live in `tests/` and mock the OpenAI client and ChromaDB, so they run offline
 
 Chunks indexed before Stage 7 lack `page` and `chunk_id`. Use the Maintenance
@@ -69,7 +71,8 @@ Run the tests with:
 6. Grounded answer generation from retrieved context only.
 7. Source citations, page and chunk metadata, and source display in the interface.
 8. Thumbs-up/down feedback on answers, saved in SQLite with a developer summary.
-9. Golden evaluation dataset (JSONL), validator, and feedback-candidate exporter. No scoring yet.
+9. Golden evaluation dataset (JSONL), validator, and feedback-candidate exporter.
+10. Automated RAG evaluation against the golden dataset, with a committed baseline report.
 
 ## Possible next tasks
 
@@ -80,4 +83,4 @@ Still one narrow change at a time.
 - Detect section headings in PDFs, not just Markdown; today PDF chunks usually have no section name.
 - Move from character-based chunking to sentence or paragraph boundaries so excerpts stop starting mid-sentence.
 - Manage multiple indexed documents: list them, delete one, and re-index without resetting the whole collection.
-- Score answers against the golden dataset: retrieval hit rate, keyword coverage, unanswerable handling (Stage 10).
+- Improve weak baseline cases (low MRR on table chunks, incorrect abstention on eval_006), comparing each change with `reports/baseline/`.
