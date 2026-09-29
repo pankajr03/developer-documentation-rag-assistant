@@ -19,10 +19,17 @@ ships an **evaluation harness**: a golden dataset, retrieval and answer
 metrics, and a committed baseline report. With these, you can measure a
 change instead of guessing whether it helped.
 
+![Ask Documentation: a cited answer with its top source expanded](docs/images/ask-documentation.png)
+
+**▶ [Watch the 2½-minute demo](docs/demo.mp4)**. This captioned walkthrough
+covers indexing, a cited answer, a refused question, and the evaluation
+dashboard.
+
 ---
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Highlights](#highlights)
 - [Example](#example)
 - [Architecture](#architecture)
@@ -37,6 +44,18 @@ change instead of guessing whether it helped.
 - [Reference](#reference)
 
 ---
+
+## Screenshots
+
+| Manage Documents | Evaluation |
+| --- | --- |
+| ![Manage Documents: re-uploading an indexed file is skipped as a duplicate](docs/images/manage-documents.png) | ![Evaluation: baseline report with retrieval and answer metrics](docs/images/evaluation.png) |
+| Upload, index, and inspect the knowledge base. Re-uploading an already indexed document is detected and skipped. | The baseline report: 23 golden cases with retrieval and answer metrics, plus a list of weak cases. |
+
+The screenshot at the top shows the **Ask Documentation** page. The answer
+cites `[Source 1]`, and the expanded source shows its file, page, chunk id,
+distance, and excerpt. That answer used the app's default of 3 retrieved
+chunks.
 
 ## Highlights
 
@@ -378,6 +397,7 @@ developer-doc-assistant/
 ├── tests/                    260 offline unit tests
 ├── data/evaluation/          golden_dataset.jsonl (committed)
 ├── reports/baseline/         baseline evaluation report (committed)
+├── docs/                     demo video and screenshots
 └── requirements.txt
 ```
 
